@@ -4,7 +4,7 @@ import random
 from datetime import datetime, timezone
 from confluent_kafka import Producer
 
-# --- Connection setup (boilerplate — connects to our local Redpanda) ---
+
 conf = {
     "bootstrap.servers": "localhost:19092"
 }
@@ -15,7 +15,7 @@ DEVICE_IDS = ["sensor-01", "sensor-02", "sensor-03", "sensor-04"]
 
 
 def delivery_report(err, msg):
-    """Called once Redpanda confirms it received the message (or failed to)."""
+    
     if err is not None:
         print(f"Delivery failed: {err}")
     else:
@@ -23,7 +23,7 @@ def delivery_report(err, msg):
 
 
 def generate_reading():
-    """Creates one fake telemetry event. Mostly good data, occasionally bad on purpose."""
+    
     device_id = random.choice(DEVICE_IDS)
 
     reading = {
@@ -34,17 +34,17 @@ def generate_reading():
         "event_timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Inject bad data ~10% of the time, so we have something for validation to catch later
+    # Inject bad data ~10% of the time
     if random.random() < 0.10:
         bad_field = random.choice(["temperature", "humidity", "cpu_usage", "missing"])
         if bad_field == "temperature":
-            reading["temperature"] = round(random.uniform(200.0, 500.0), 2)  # impossible value
+            reading["temperature"] = round(random.uniform(200.0, 500.0), 2)  
         elif bad_field == "humidity":
-            reading["humidity"] = None  # missing value
+            reading["humidity"] = None  
         elif bad_field == "cpu_usage":
-            reading["cpu_usage"] = -50.0  # impossible negative value
+            reading["cpu_usage"] = -50.0  
         elif bad_field == "missing":
-            del reading["device_id"]  # missing required field
+            del reading["device_id"] 
 
     return reading
 
@@ -59,9 +59,9 @@ if __name__ == "__main__":
                 value=json.dumps(event).encode("utf-8"),
                 callback=delivery_report,
             )
-            producer.poll(0)  # triggers delivery_report callbacks
-            time.sleep(0.5)   # one message every half second
+            producer.poll(0)  
+            time.sleep(0.5)   
     except KeyboardInterrupt:
         print("\nStopping producer...")
     finally:
-        producer.flush()  # make sure any in-flight messages are sent before exiting
+        producer.flush() 

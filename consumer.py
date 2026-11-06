@@ -1,39 +1,95 @@
 import json
+import time
+import polars as pl
 from confluent_kafka import Consumer
 
-# --- Connection setup ---
+from validation import validate_batch, split_batch
+from storage import get_connection, write_clean, write_rejected
+
+
 conf = {
     "bootstrap.servers": "localhost:19092",
-    "group.id": "telemetry-consumer-group",   # identifies this consumer (or group of consumers)
-    "auto.offset.reset": "earliest",          # if no saved position, start from the beginning of the topic
-    "enable.auto.commit": False,              # WE control exactly when a message is marked "done" — see explanation below
+    "group.id": "telemetry-consumer-group",
+    "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,
 }
 consumer = Consumer(conf)
-
 TOPIC = "telemetry.raw"
 consumer.subscribe([TOPIC])
 
+BATCH_SIZE = 20         
+BATCH_TIMEOUT = 5.0     
+
+SCHEMA = {
+    "device_id": pl.Utf8,
+    "temperature": pl.Float64,
+    "humidity": pl.Float64,
+    "cpu_usage": pl.Float64,
+    "event_timestamp": pl.Utf8,  
+}
+
+
+def process_batch(con, buffer, messages):
+    
+    if not buffer:
+        return
+
+    df = pl.DataFrame(buffer, schema=SCHEMA)
+    df = df.with_columns(
+    pl.col("event_timestamp").str.to_datetime(
+        format="%+",
+        time_zone="UTC",
+        strict=False
+    )
+)
+
+    validated_df = validate_batch(df)
+    clean_df, rejected_df = split_batch(validated_df)
+
+    if clean_df.height > 0:
+        write_clean(con, clean_df)
+    if rejected_df.height > 0:
+        write_rejected(con, rejected_df)
+
+    print(f"Flushed batch: {clean_df.height} clean, {rejected_df.height} rejected")
+
+    
+    for msg in messages:
+        consumer.commit(msg)
+
+
 if __name__ == "__main__":
     print(f"Listening to topic '{TOPIC}'. Press Ctrl+C to stop.\n")
+    con = get_connection()
+
+    buffer = []       
+    messages = []      
+    last_flush = time.time()
+
     try:
         while True:
-            msg = consumer.poll(timeout=1.0)  # wait up to 1 second for a new message
+            msg = consumer.poll(timeout=1.0)
 
-            if msg is None:
-                continue  # no message arrived in this second, just loop again
+            if msg is not None:
+                if msg.error():
+                    print(f"Consumer error: {msg.error()}")
+                else:
+                    event = json.loads(msg.value().decode("utf-8"))
+                    buffer.append(event)
+                    messages.append(msg)
 
-            if msg.error():
-                print(f"Consumer error: {msg.error()}")
-                continue
+            time_elapsed = time.time() - last_flush
+            should_flush = len(buffer) >= BATCH_SIZE or (buffer and time_elapsed >= BATCH_TIMEOUT)
 
-            event = json.loads(msg.value().decode("utf-8"))
-            print(f"Received: {event}")
-
-            # Mark this message as processed. We do this AFTER we've handled it,
-            # never before — that's the core offset-safety rule.
-            consumer.commit(msg)
+            if should_flush:
+                process_batch(con, buffer, messages)
+                buffer = []
+                messages = []
+                last_flush = time.time()
 
     except KeyboardInterrupt:
         print("\nStopping consumer...")
+        process_batch(con, buffer, messages)  
     finally:
         consumer.close()
+        con.close()
